@@ -1,0 +1,183 @@
+Designing Parallel Systems
+
+The two fundamental religions of designing high-load systems are: stay single-threaded or use multiple threads.
+
+Yes, you may be surprised, the single-threaded model is alive and well, and it does have its merits still. Specifically, it ensures no concurrent data access can take place, and, thus, developers who are not familiar with the pitfalls of multithreading can be productive over a long period of time.
+
+Also, sharding work across binaries is, logically, easier to follow for most people than sharding work across threads. And there is no rule that prevents binaries from talking to each other within a single machine. Therefore, in a way, the single-threaded paradigm is not constraining the fleet utilization to at most one CPU core per machine. In a well-maintained setup, a number of single-threaded binaries can comfortably talk to each other, using sockets when remote and shared memory when colocated, and, as the theoretical limit, use all the cores on all the machines.
+
+After giving due to the single-threaded setups, let’s look into multithreading. In the world of multiple threads there seemingly is a lot more to be concerned about, for example:
+
+• Mutexes as the most basic synchronization mechanism. Lock contention if they are used too frequently.
+
+• Read-write mutexes, reentrant mutexes, and semaphores, when just mutexes are not enough.
+
+• Atomic variables, the values of which can be loaded and saved seemingly concurrently.
+
+• Memory ordering, when the developer must tell the CPU which operations to not rearrange.
+
+• Critical sections, if you are in Windows and want a full system lockdown for your task.
+
+• The lifetimes of singletons, which may get constructed concurrently by several threads.
+
+• And, of course, the full-blown spectrum of deadlocks and livelocks, where the latter are a lot more painful to debug than the former.
+
+This post is a summarization of what I have learned over the years about how to avoid most of the above problems.
+
+Specifically, I am going to describe a paradigm that, on the one hand, lets the developer of a particular feature reside in the comfort of reasoning about their application as a single-threaded one, and, on the other hand, lets the architect to see the whole system as a distributed one, that spans multiple machines when viewed on the macro scale, and multiple CPU cores when seen on the micro scale.
+
+The paradigm begins with the assumption that all data processing is streamed and sequential.
+
+For simplicity, imagine a system where every single element of data being transmitted is of a fixed length, say, 128 bytes. Dealing with variable length data elements is conceptually no harder, but it makes the description unnecessarily longer.
+
+Where there is a streaming data processing task, there is a buffer in memory, where the input flow of data appears. In most real-life application this will be a circular buffer.
+
+To stay grounded and operate with real numbers, for our example of each data entry being 128 bytes, let’s allocate a buffer of one gigabyte, which would fit a bit more than 8 million data entries.
+
+On a conceptual level, however, it is important to keep in mind that neither the size of the buffer nor the fact that it is circular, is material. The buffer may well be a terabyte large, or we could be writing code for a machine that somehow supports circular buffers natively, so that the user code effectively has an unlimited supply of sequential memory, as long as it declares the already processed part of the buffer as such.
+
+The important so far parts are that:
+
+• There is a buffer, which, as the program starts, begins empty, at size zero.
+
+• This buffer is split into cells (which are 128 bytes in our case).
+
+• Following the traditions of computer science, let’s index this buffer at zero, so that its first element is buffer[0]
+
+• There is a pointer in this buffer, or an index, if you prefer. The physical meaning of this pointer or index is “how many data entries have, so far, been added to the buffer”. We could refer to as a blue arrow pointing to some separator between the cells. Or we could color everything to the right of this pointer as grey (the “unmarked territory”), and everything to the left of it as blue (the “data to be processed”). In this analogy, this pointer or index moving one element to the right results in one cell of this buffer changing color from grey to blue.
+
+Obviously, there is one and only one writer into this buffer. There will also be one or more workers attached to this buffer, more on this below.
+
+Possible examples of such single writers are:
+
+• A reader from a network socket (or, more generally, a PubSub subscriber),
+
+• A reader from a file (or, more likely, a reader that seamlessly changes from one file to another, in certain sequence),
+
+• Some generator code, which emits, say, the prime numbers from two to infinity, as soon as it confirms the numbers are prime,
+
+• A throughput-measuring generator, which is no different from a simple data generator, except it does the job of measuring how many data entries can this pipeline process in a second; or, more likely, how many gigabytes of data can this pipeline process in a second,
+
+• An output of another, locally-run, pipeline consisting of the same circular buffer plus its own workers, where the ultimate output of that pipeline is fed, as the input, into this one, or
+
+• Any combination of the above, provided that it is implemented in a synchronized way, so no two writers can “collide” as they have more data to write into this pipeline, so that they can, logically, be treated as a single writer.
+
+Now, we have visualized the writers as the entities that color our initially-grey cells into blue, left-to-right. Similarly, we can visualize the workers as the entities that color the already-turned-blue cells green, also left-to-right. The rules for the workers are very simple:
+
+• The worker can only take a blue cell and turn it green. If there is no blue in the buffer, but just green and grey, then the pipeline has processed all the data, and is now in the state of waiting for new data entries to enter the system.
+
+• The worker processed the blue cells left to right. Its atomic operation it taking the leftmost blue cell and turning it into green.
+
+• The worker can only access the blue cells of the buffer; it can view the current leftmost, blue cell, and, possibly, more cells that are blue to the right of the one that it is currently working on. It can not look left, into the past, because, as the cell was colored green, it is no longer in the memory that is accessible (speaking in the circular buffer terms, the writer will eventually overwrite that memory location with a new blue cell).
+
+In other words, with one write and one worker, our infinite buffer is visually split into three areas
+
+• The leftmost: green: The data entries that have been received and processed,
+
+• The middle blue. The data entries that have been received and are currently waiting to be processed, and
+
+• The rightmost grey: The data entries that are the future ahead, yet to be seen.
+
+Possible examples of operations the workers can perform are:
+
+• Send data over the network (to be processed off this machine),
+
+• Save data into a file (or, rather, a sequence of files),
+
+• Feed data into another circular buffer (a worker in one pipeline that is a writer into another, local, one),
+
+• Discard the data, but perform certain view-only operation over it, such as ensure certain invariants are held, or measure the throughput of the pipeline,
+
+• Modify the data, in certain streamed way (for example, stamp each 128-byte block with its own 8-byte unique index), or
+
+• Perform several operations in parallel, see below.
+
+The important takeaway message here is that when the workers need to modify the data, they do so in-place. The workers can not add or remove entries, and the workers can not change the size of the entries. (They can, in theory, overwrite some forthcoming “blue” entries before turning them green, in a stateful manner, but that would generally be bad design.)
+
+The rule of thumb is: to process the data with high throughput, either don’t change the size of each block, or act as a separate writer and create a new stream of data, send into a different pipeline.
+
+In the latter case, as we now know how to enumerate the inbound flow of data with their own unique indexes, we can always reconcile several dataflows together, and, fully asynchronously, without hurting the throughput, figure out what was the system’s reaction to certain inbound request — even if this reaction were to appear at a later point in time, after several workers in several pipelines processing this request and other, internal, sub-requests, which this request has generated.
+
+To make the next big step, let’s focus on a single writer and single worker.
+
+Imagine a simple “pass-through” pipeline, which, for example, reads data sequentially from disk, and writes it, sequentially, into a network socket.
+
+The fundamental idea of keeping the application logic single-threaded is that the writer and the worker in this pipeline can safely run in different threads.
+
+Yes, they are accessing the same (circular) buffer of data. But they are always looking at the different parts of this buffer. The writer writes into grey cells and, strictly after writing into them, turns them blue. The worker operates on the blue cells, and, strictly after completing its work, turns them green.
+
+Thus, the synchronization mechanisms required to enable these two-threads setup are simply the means to safely move two pointers: the one on the right, that separates blue from grey, and the one on the left, that separates green from blue.
+
+In the simplest practical design possible, these two pointers can be two variables protected by a single mutex. As long as this mutex is not locked and unlocked on the recoloring of every single cell, the design is, in fact, robust enough.
+
+In practice, as both reading from a large file and writing into a network socket are bulk operations, all programmers know that reading and/or writing data byte by byte is extremely inefficient. Therefore, even the most straightforward and bulletproof code one could come up with to follow the above logic would read and write data in blocks, way more than one byte long. The two-pointer design above fully supports this idea: the writer is free to color however many grey cells into blue, provided they form a continuous block, and the worker is free to color however any blue cells green, provided, again, they maintain the overall invariant of our infinite buffer being colored into three stripes, green, blue, and grey, when looking left to right.
+
+It is now time to talk about the pipeline that consist of several workers. For example:
+
+• Enumerate the inbound flow of data entries and send them further.
+
+• Split the inbound flow of data entries and send it into three separate destinations.
+
+• Save the inbound flow of data entries to a file, and still send it into three separate destinations.
+
+• Enumerate the inbound flow of data entries, perform some business logic based on the contents of those data entries, possibly send some other data entries into a different pipeline (local or remote), and then, still send the original, but now numbered, data flow further down the pipeline.
+
+The basic rules now are:
+
+• Each worker can be run in its own thread,
+
+• When a worker can possibly modify the data, the next worker can only begin processing the entries that the previous one has already processed, and
+
+• When several workers just observe the data, and do not modify it, they can access the data block concurrently, but they must all complete their work prior to declaring certain data entry cleared for the next stage.
+
+Here is an example of two operations where the first one can modify the data, and therefore must complete fully before the next one can begin:
+
+• Stamp unique indexes to each data entry,
+
+• And send these data entries further over the network.
+
+Clearly, it would ruin the purpose if the data would be sent out before being stamped; the stamping of an index for each particular data entry should happen strictly before this entry is cleared to be sent out via the network.
+
+In this case, a simple visualization would help. Instead of three colors — green, blue, and grey — we would have four. Let’s keep the rightmost grey for the “unmarked territory” of the future, and the leftmost green for “fully processed, stamped and sent out, this memory can be reused”. The blue color would now be split into two, say, cyan and magenta.
+
+The cyan, to the immediate right of green, and to the immediate left of magenta, would be “the data entries that have already had their indexes stamped, and are ready to be sent out”. The magenta, to the immediate right of cyan and to the immediate left of gray, would be “the data entries that have entered the system, and are ready for the first stage of processing, which is to stamp the indexes onto them”.
+
+And the main invariant now is that the buffer is colored left to right into four colors: green, cyan, magenta, grey. The colors can not be mixed up, and there are exactly three separating pointers. The widths of some color stripes, however, can be shrunk to zero, i.e., those stripes could be non-existent: for example, if all the inbound data entries have already had their indexes stamped, and they are now in the queue of being sent out over the network, the width of the magenta stripe would be zero.
+
+We are back to the design of advancing pointers, only instead of two we now have three. Again, much like in the trivial case above, simple mutexes would work as the first approximation, as long as the index stamping worker does not lock and unlock this mutex on every single 128-byte entry stamped. Again, there are better solutions than mutexes, because doing down the chain of workers the access pattern is strictly “one thread that modifies this value, and one more that only reads it”.
+
+It is easy to see that the below sequence of workers is perfectly scalable. If there are three, not two, workers, where the first two modify the data and thus should complete before the next ones begin, we would then have five colors in the visualization, and four pointers to synchronously operate.
+
+The final case to consider arises when multiple workers need to process the data, but they are the read-only workers, that do not modify the elements. The read-only workers, clearly, can be run in parallel, as they do not have to wait for one another.
+
+A perfect example of a read-only worker is the worker that passes the data along, by saving it to disk, or sending it further over the network.
+
+So, consider the following chain of workers on machine A:
+
+• Save data to disk.
+
+• Send data to machine B,
+
+• Send data to machine C,
+
+• Stamp unique indexes to each data entry, and
+
+• Send the now-stamped data to machine D.
+
+By the way, while the example may look made-up, it actually is a perfectly plausible real-life scenario. Stamping indexes requires CPU, while saving data and sending it further are kernel-level operations, and, for data integrity purposes, it may be beneficial to keep the data backed up before the indexes are stamped — after all, given that the order of data is preserved, the same indexes can always be re-stamped later.
+
+So, in this design, the first three operations can and should be run in parallel, and all three of them must complete before the stamping worker begins to do its job.
+
+The above procedure of colored stripes and advancing pointers one per worker would be suboptimal here, as it would make sure that the data is saved to disk before it is sent to B, and that it is sent to B before it is sent to C.
+
+The optimal solution requires some extra, yet relatively trivial, logic related to managing the advancing pointers. As the first three workers do not alter the data, they are allowed to access it concurrently. So, imaginarily, if they have their own colors, these colors can advance left-to-right at their own pace, overtaking each other as they please, as long as ultimately they reach the rightmost “boundary” of how much data is available for them to process.
+
+A better visualization here could be that all three share the same color, but the stripe to be colored is split horizontally, into three long and thin slices. So, if that color is orange, and the color to its left is purple, there is not a single orange stripe that is gradually turning purple left to right, but the three orange one above the other, that are becoming purple at various rates, overtaking each other as they please.
+
+And, of course, as there can possibly be another worker, that takes in the purple strike and colors it, say, olive, this another worker, obviously, can not overtake any of the orange-to-purple workers. But, as long as everything up to certain point from the left is purple, the brown worker can begin working on that part of the buffer. Thus, we have derived the rules for parallel processing:
+
+• For all read-only workers that run in parallel, there is only one pointer to synchronously maintain: the slowest of these workers.
+
+Of course, much like in the previous example, each worked can, and probably should, be run in a separate CPU thread.
+
+And this concludes the story of how parallelization can be achieved in a multithreaded high-throughput system, with the code of each individual worked developed by an engineer who would rather not touch multithreading of any kind with a ten foot pole.

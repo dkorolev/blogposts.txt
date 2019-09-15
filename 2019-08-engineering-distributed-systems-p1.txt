@@ -1,0 +1,134 @@
+Engineering Distributed Systems
+
+
+This writeup summarizes what I learned about building software systems that process large volumes of data.
+
+The intended audience are the engineers who know what a programming language or an API is, but are not necessarily familiar with distributed computing, or, as it is often glamorously called these days, Cloud Engineering.
+
+At the same time, I did my best to lay out the concepts in a simple enough language, so that even readers who are not engineers, but just barely on the spectrum, could both enjoy the post and learn something new.
+
+Part one: Consistency.
+
+The first idea to be introduced is the idea of consistency. In a nutshell, consistency is making sure the data, as seen and managed by the service, does not contradict itself.
+
+Think of a country with a long-lasting tradition: each newborn child gets assigned a number, which is the index of this child in the lineage of the country.
+
+At some point in the past, when the country was being established, a, say, soon-to-become emperor child was born, and this soon-to-be emperor was assigned the number one. The very next child born is then assigned the number two, and the tradition is rigorously followed since.
+
+Mathematically speaking, at any point of time there exists a strict one to one mapping between all N children born in this country and the set of natural numbers from 1 to N. Now, a consistent system, which does not contradict itself, is simply a system that ensures this tradition is kept.
+
+How would you design such a system?
+
+Well, a decent first approximation would be to think of some authoritative body where important paperwork is handled. There is a very dedicated table for the childbirth numbering ritual, at which there sits a noble, honored officer, whose sacred job includes, if not consist exclusively of, allocating The Very Next Number every time a newborn child should be issued one.
+
+There probably is a paper trail, such as a pile of birth certificates numbered accordingly, stamped, and kept safely in the vault. To make sure no extraordinary circumstances can disrupt the tradition, several identical copies of this pile are maintained and stored at various safe locations, and, every time a new birth certificate is issued, a messenger, or a few of them, are sent to those safe locations right away, so that the paperwork is up to date everywhere.
+
+The above describes a canonical single-machine scenario. The numbers-issuing officer is the CPU, or, rather a single CPU core. The total number of children born so far is a variable, stored in the main memory tied directly to this CPU. The pile of birth certificates is an array, which also resides in memory, because if the main office building suddenly burns to the ground, this pile is lost forever. And the copies of this pile at various safe locations are the contents of this array stored on disk, locally or elsewhere, because they would survive the fire.
+
+It is important to realize that the single-machine single CPU core scenario is consistent by design.
+
+There can not be a situation when two children get assigned the same Number. There can not be a situation where a Number is skipped, such as 1003 journaled after 1001, with 1002 gone missing. This is because the officer who is issuing those Numbers can only issue one birth certificate at a time. In other words, requesting a new birth certificate is a blocking call: while it is being processed, the CPU is occupied 100% by this task, and can not be interrupted. If there is more than one newborn to be registered, requesters will have to form a line and each wait their turn. If this officer is off for the day, or perhaps sick, this line may grow substantially; but, still, as soon as the job of issuing The Numbers is resumed, the invariant encoded in the tradition will continue to be followed strictly.
+
+Now our imaginary country is growing, and children are born more frequently. At some point a single person working on each birth certificate and assigning The Number to each of them just can’t keep up.
+
+Further into the story I will touch on the subject of handling scale. For now, it is just worth noting that assigning The Number is just a small – although extremely important! – part of the process of issuing the birth certificate. Thus, an easy way to significantly increase the throughput of the process is to have multiple clerks working on birth certificates; on all but The Number assignment part of them.
+
+These almost-complete birth certificates would then get routed to an even more important table where The Very Next Number is assigned. The higher-level official is now freed from all the duties of preparing the very birth certificate; all they have to do is stamp the incoming ones with The Very Next Number each.
+
+The above is a canonical example of load balancing by scaling the frontend horizontally. The clerks can be dedicated CPUs and/or dedicated CPU cores. As long as there is a single officer (a single core of a single CPU) who issues each and every Very Next Number, the overall design is still guaranteed to be consistent. In the world of software engineering this single officer will be referred to as a mutex.
+
+It is also important to internalize that in such design some clerks would complete some birth certificates faster than others. In other words, it is no longer guaranteed that if Y came after X, The Number assigned to Y would be greater than the one that X receives. For our particular problem statement such a guarantee is not required, as we only need to maintain a strict mapping between all children and the natural numbers from one to N inclusive.
+
+Generally speaking, however, this problem is next to unsolvable: an obvious idea of assigning The Number as X or Y enter the building doesn’t work, as a) not all birth certificates can be issued, which might only get discovered later, and b) the very action of assigning The Number stops being atomic, as the building could be destroyed by fire while some X is working their way from the entrance (where they got The Number assigned) to the exit (where they walk away with the completed birth certificate). This is not to mention potentially malicious agents, who could get their number pre-assigned and leave without proceeding further, destroying the no-skip invariant once and for all.
+
+A lot more painful real life problem is partitioning.
+
+Remember we talked about various safe locations where the copies of the piles of birth certificates are stored? While our hypothetical country is small, those safe locations can just be across the street from the main office, a dozen seconds away from where The Very Next Number was just assigned. As the country grows larger, a dozen seconds could become a dozen minutes, as one would have to ride a horse instead of walking over. But the game is still the same.
+
+The catch though is that everyone – all the inhabitants and all the officers – knows where The Main Office is. And everyone shows up there to register newborns.
+
+If this main office is destroyed by fire, there will be a brief interruption in the service of issuing birth certificates (or at least of stamping The Numbers on them), and then a new Main Office will open; likely in one of the locations that used to store the copies of previously issued birth certificates. And we’ll be back to the consistency paradise: the inhabitants are back to knowing where to register newborns, and the officers know where to send messengers with carbon copies of the freshly issued birth certificates with The Numbers on them.
+
+But how do the inhabitants – and the officers! – know which one is the new Main Office?
+
+One could say that the Main Office is the one which a higher-order authority has declared to be the Main Office. But this logic does not solve the problem at all; in fact, it only proves how far we actually are from solving it.
+
+Say, we assume the higher-order authority has its own Main Office. Say, we also are wise enough to not put it into the same building with the Main Office that issues the Very Next Number, so that a fire destroying both at the same time is highly unlikely. Still, what happens if both of them are gone for good simultaneously?
+
+The problem is now very hard, especially when consistency is the strong requirement that can not be sacrificed. In fact, in computer science there is what is called the CAP theorem, that states that it is impossible to simultaneously have all three: consistency, availability, and partition tolerance.
+
+Thus, if consistency can not be sacrificed, the system will either not always be available, or not always be partition-tolerant. An example of an unavailable state is an “Office closed until further notice” greeting. An example of bad partition intolerance could be that when a country is cut in half for an extended period of time by a natural disaster such as a flood, each half may function “as if” everything is consistent from within itself, while in reality The Numbers will get mixed between halves, to the degree that makes reconciliation impossible.
+
+This is why in real life for tasks where both consistency and partition tolerance are required, the system can not be 100% available. It will have downtimes, and the question is not if but when.
+
+Simply put, if you store your money on a bank account that guarantees this money is available with a guarantee of no overdrafts from both Europe and from Asia, you have no other option but to assume that the lack of connectivity between Europe and Asia would immediately render all the funds on that account unavailable. This is due to the simple fact that either side has no way of knowing whether the other one has already withdrawn some or all the funds from your account.
+
+Interestingly, from the mathematical and from the computer science perspectives, to keep the system somewhat functional, all we need is a single 100% available and 100% partition tolerant agent, with extremely low throughput requirements. Keep in mind, the higher order authority only has to interfere in those rare cases when:
+
+The currently Main Office for issuing The Very Next Number is unavailable for an extended period of time; possibly forever, AND
+The higher-order authority that will decide where the next Main Office for issuing The Very Next Number is also unavailable, for an extended period of time as well, possibly forever.
+So, if only we could have such an agent available, the problem will cease to exist.
+
+Now, a pragmatic engineer might ask why don’t cloud hosting providers offer those ultra-low-performing yet ultra-reliable servers for rent.
+
+After all it is not hard to get a satellite-grade computer, equip it with an independent power supply, box it into a Faraday cage, and connect it to all the other datacenters via various high-reliability low-throughput network channels, such as cables, satellite radio, and perhaps even more old-school means such Morse Code over signal towers employing laser beams to communicate with one another.
+
+This would actually be a very reasonable question to ask, and I don’t have a good answer to at least some parts of it – i.e., why don’t we have reserve laser-based telegraph inspired by signal towers that existed millennia ago.
+
+For the most part, however, the answer exists, and is simple: Because doing so would not be cost-effective.
+
+A wider adopted solution is the one that is called leader election in software engineering; or, speaking more broadly, a variant of the consensus algorithm protocol. Another key term to browse around would be the split-brain problem.
+
+Without going further down the rabbit hole of distributed consensus in the world of possibly malicious agents, let me just make a simple note that this is why Bitcoin is so hard to design, and requires so much computing power across the globe to run. The only problem it solves is eliminating the need in that one single Global Authority, not even in the most unlikely 0.0000001% of cases. Managing consistent state and being ninety nine point many nines percent available is a lot easier if in those fraction of a fraction of a percent cases we allow for a human, or for some other centralized management entity, to interfere; even if this interference literally is to roll a die and announce that of the six possible candidates for the next master authority X is the one.
+
+So, our country already has several locations that keep the books of all the birth certificates issued, with The Number on them. Let’s say there are N total location, with the Main Office counted as one of them. N is traditionally assumed to be an odd number; say, five.
+
+Utilizing the leader elections mechanism ensures that as long as (N+1)/2 locations are functional and can communicate with each other, the “global” system will function uninterrupted.
+
+As an extra benefit, the leader elections mechanism ensures that the very notion of which branch currently is the Main Office is abstracted away from the end users. They just go to any branch and receive full service as if this branch is the Main Office, as long as it is part of the clique that consists of (N+1)/2 branches talking to each other.
+
+In other words, in order to be in operation, the branch should be able to talk to (N-1)/2 other branches. So, for N=3, a branch that has an established communication channel with at least one other branch is fully operational, as together they make two, and two would always be the majority when the total is three. For N=5, a branch that can communicate with two other branches is fully operational, because it itself plus the two others make it three, with is guaranteed to be the majority in the total of five.
+
+Moreover, employing leader elections loosens the requirements on the connectivity for the end users. Imagine there are N=5 locations, and severe flood has divided the country into five disconnected areas, with no connectivity between them. You can not call your mother who is locked down in some other area, as the phone network is down. Still, as long as (N+1)/2=3 branches have established low-bandwidth mutual connectivity (say, via pigeon mail), whoever is situated in the areas where those three branches are can register newborn children and receive The Numbers correctly. Naturally, it would take a lot longer to process those New Number requests, but the system will still be functional; although slow.
+
+Yes, I am positive our hypothetical country would also be able to utilize technology in a socially positive way, so that, after the Numbering Tradition needs are fulfilled, the leftover capacity of the pigeon mail traffic will be free to use for personal communication needs during those hard times.
+
+In computer science terms, the extra time the New Number request would take due to the need for the pigeons to fly back and forth is called latency. Yes, it is the same “high ping” that makes it impossible to play first person shooters over poor network connection, even though I am not aware of any popular first person shooter game that would use a consensus protocol behind the scenes.
+
+It is now plausible to ask: how many pigeon round-trips would it take for the New Number Request to be fulfilled?
+
+Say, we have three of five branches, A, B, and C, talking to each other via pigeon mail, and it takes an hour to deliver a message in each of six directions (A→B, B→A, A→C, C→A, B→C, C→B). Also, let’s assume that, as the result of the leader elections mechanism functioning smoothly, A, B, and C all know that A is the leader.
+
+If you were to request a new Number for a newborn child at B, B would have to talk to A. But it will not just be B asking A to “give me the Number”, and A replying back with “here it is”. In addition to such an exchange, both A and B would need to know that C is also aware of this Number being issued – otherwise C may lose connectivity with A and B, rejoice with D and E, and commit the Cardinal Sin of greenlighting the same Number that A and B have already agreed to be issued.
+
+So, the “customer” walks into B and requests a Number, and B asks A for one.
+
+B may fully delegate the task of allocating a new Number to A, or B’s request may go along the lines of “Hi A, I believe the next available number is X, please confirm this as our leader.” The latter approach is a bit more clever, as B could simultaneously send the message to C, along the lines of “Hi C, I have just requested A to confirm X is safe for me to release”, so that C can already begin communicating with A as well, before the full two hours of the message would take to travel B → A → C.
+
+The response from A to B could go along the lines of: Confirming, X is your Number; I have also just communicated with C and they have made the respective changes on their end. Or it could be: I reached out to C with this confirmation, and C will get back to you directly acknowledging the confirmation of my confirmation; please proceed once you get this confirmation from me, and the confirmation of the confirmation from C.
+
+As you can see, things do get tricky here. That’s why distributed computing is hard.
+
+Also, don’t assume it’s a lot easier if the request originates at A, which is currently the leader. Because there also is a nontrivial amount of logic required to revert the “transaction” should it go through only partially.
+
+Sure, as the leader, A would know exactly what should X be, but it can not release this X to the “customer” until it’s confirmed by both B and C; or by any other two branches, as we have a total of five in our example. It is easy to imagine a scenario when the connectivity between A and C is lost in the middle of the exchange. We would then end up in a limbo state of A asking B and C to declare X as “released”, B successfully marking X as such, and C disappearing in the meantime. To make things worse, C may have actually confirmed the receipt of X being released, but it’s the message with this confirmation from C that got lost in transit. In the meantime, the connection is lost between A and the rest of the fleet, while B and C get together with E – and the new { B, C, E } cluster is happy to declare itself a majority, sincerely believing that the Number X requested by A is now assigned to a newborn in A, with A unaware of these very mutually confirmed confirmations successfully taking place.
+
+In a well-designed protocol, a happy reconciliation will happen even if A is gone for good, because the “customer” request to A was made on a form with a special “request ID” token. So, later on, down the road, the “customer“, who originally came to A which is now gone, will get to B, and is smart enough to not make a “new” request, but present the same form with the same “request ID”. The response they would then get from B (or C, or E, or any other P or Q should the topology change by then) would be some “Oh, this request was successfully fulfilled by A a long time ago; your Number is X, thank you, and have a good day”.
+
+In a real-life computing system, by the way, not only would the above happen in a split second; the “customer” may well be totally unaware of whether they are speaking with A, B, or C. They may not even be aware that their request has internally resulted in a retransmission, as A went down for good during this very request. All they would notice is that the response they have received took an extra split second; in other words, they would likely notice nothing at all.
+
+However, keep in mind that the latency between nodes is unavoidable here: the contents of the request would have to, at the very least, travel between the furthest nodes back and forth. So, if it’s between Europe and Asia, it’s closer to half a second best case, and if it’s between the Earth and our Moon, it’s several seconds at least.
+
+I promise no more boring leader elections chat from here on. For more information, feel free to explore the Two Generals Problem, and the Byzantine consensus one.
+
+Also, do not forget that as consistency and partition tolerance are the strict requirements, per the CAP theorem, availability can not be guaranteed. Simply put, if in the { A, B, C, D, E } cluster where { A, B, C } can talk to each other but D and E are not part of this clique, then the users of D and E are out of luck with respect to requesting changes to the system.
+
+They would have read-only access to some, current, or, more likely, already-past state of the fleet. And, in the case of some partial (perhaps, one-way) connectivity, the requests they managed to send to the system will quite possibly be fulfilled. This is why the “request ID” is the crucial piece of the system; this is why idempotence (loosely the design idea where the “request ID” is required in any inbound request) is such an important property of an API, and this is why without the “request ID” reserved and kept on the caller side there can never be the “exactly once” guarantee, but only the “at least once” and the “at most once” options to choose from – both of which are incompatible with the requirement of consistency.
+
+In reality, when consistency is required, the design is always the “at least once” delivery, with request IDs inserted into reach request to keep them idempotent.
+
+On a closing note of part one, to keep things somewhat easier to grasp, take a step up and think of two systems, with their own strong consistency guarantees, talking to each other. If each system, in and of itself, is designed following the above principles, there is a huge chance that, should a problem occur, it is not within one of the systems, but rather in the communication layer between them. Each system can be designed so that it is strongly consistent, with enormously high availability. It literally is more likely that a wire connecting those systems will be struck by lightning or damaged by an earthquake than it is that one of the systems would misbehave while handling the request.
+
+The summary of the “Consistency” part is that there are established mechanisms that make a distributed system act as if it is one whole being, although a) the under-the-hood mechanisms developed to ensure consistency of a fragmented system could be quite sophisticated, and b) if consistency and partition-tolerance are requested by design, the system can, and will, be unavailable at times.
+
+To be continued.
