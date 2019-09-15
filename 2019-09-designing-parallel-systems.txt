@@ -198,4 +198,22 @@ Another way is to forget the idea of a single circular buffer and work with two 
 
 And, of course, to prevent lock contention, it is useful to allocate a time cushion between consecutive mutex locks. For example, if your callers are the end users, who are real humans connected to you from real computers over the Internet, then, most likely, they would not notice another half a millisecond delay. Thus, even if your code is always in the “waiting for new data” mode, throttling the mutex to at most 2000 locks/unlocks per second would most likely be a viable first solution.
 
-And this concludes the story of how parallelization can be achieved in a multithreaded high-throughput system, with the code of each individual worked developed by an engineer who would rather not touch multithreading of any kind with a ten foot pole.
+The above solves the problem of joining multiple data streams into one, with no custom logic, by just appending the data into the “single bus” one way or the other.
+
+The last part is the worker that operates on multiple data streams.
+
+Two easiest to imagine real-life scenarios could be:
+
+• Make sure the data streams received from different sources are identical (for example, to confirm that the backups created in two different places match each other), and
+
+• If the data received from different sources was the data indexed and split into halves (say, the entries with odd indexes come from A, and the entries with even indexes come from B), then the output stream should perform the reconciliation respecting the desired order of entries.
+
+In both of these cases, the CPU-level work is involved. The latter case, by the way, is so common that is has a name — inplace sort — along with reference implemenations in various languages.
+
+Again, there is no need to get too fancy to solve this problem. Consider the simplest case of joining two streams index-by-index. Have two workers write their respective blocks of data into a single block of memory, following the “two-phase commit” idea to make sure the writes are parralelized. Then, as both data blobs are available, inplace-sort them. Afterwards, make sure to only send further to the workers the entries with the very next consecutive indexes — so that no holes can appear during this intelligent join phase. To not have to compare indexes one by one, the binary search algorithm can be used: if the first 100MB of data contains all the right indexes, but the first 300MB of data has the end index higher than expected, meaning there is a hole that should be filled first, then check the index of the entry at the 200MB mark next, and so on.
+
+And if the input buffer is circular, both the inplace sort and the binary search implemenetations would need to be tweaked so that they are both performant and correct with respect to possibly crossing the physical boundary of the buffer, and having to wrap the indexes over.
+
+So, processing sequential data flows is not as easy as it may look. But it still is straightforward enough when seen through the lens of the first principles.
+
+This concludes the story of how parallelization can be achieved in a multithreaded high-throughput system, with the code of each individual worked developed by an engineer who would rather not touch multithreading of any kind with a ten foot pole.
