@@ -40,11 +40,11 @@ The important so far parts are that:
 
 • There is a buffer, which, as the program starts, begins empty, at size zero.
 
-• This buffer is split into cells (which are 128 bytes in our case).
+• This buffer is split into cells (which are of 128 bytes each in our example case).
 
-• Following the traditions of computer science, let’s index this buffer at zero, so that its first element is buffer[0]
+• Following the traditions of computer science, let’s index this buffer at zero, so that its first element is buffer[0].
 
-• There is a pointer in this buffer, or an index, if you prefer. The physical meaning of this pointer or index is “how many data entries have, so far, been added to the buffer”. We could refer to as a blue arrow pointing to some separator between the cells. Or we could color everything to the right of this pointer as grey (the “unmarked territory”), and everything to the left of it as blue (the “data to be processed”). In this analogy, this pointer or index moving one element to the right results in one cell of this buffer changing color from grey to blue.
+• There is a pointer in this buffer, or an index, if you prefer. The physical meaning of this pointer or index is “how many data entries have been, so far, added to the buffer”. We could refer to as a blue arrow pointing to some separator between the cells. Or we could color everything to the right of this pointer as grey (the “unmarked territory”), and everything to the left of it as blue (the “data to be processed”). In this analogy, this pointer or index moving one element to the right results in one cell of this buffer changing color from grey to blue.
 
 Obviously, there is one and only one writer into this buffer. There will also be one or more workers attached to this buffer, more on this below.
 
@@ -72,11 +72,11 @@ Now, we have visualized the writers as the entities that color our initially-gre
 
 In other words, with one write and one worker, our infinite buffer is visually split into three areas
 
-• The leftmost: green: The data entries that have been received and processed,
+• The leftmost, green: The data entries that have been received and processed,
 
-• The middle blue. The data entries that have been received and are currently waiting to be processed, and
+• The middle, blue. The data entries that have been received and are currently waiting to be processed, and
 
-• The rightmost grey: The data entries that are the future ahead, yet to be seen.
+• The rightmost, grey: The data entries that are the future ahead, that is yet to be discovered.
 
 Possible examples of operations the workers can perform are:
 
@@ -86,7 +86,9 @@ Possible examples of operations the workers can perform are:
 
 • Feed data into another circular buffer (a worker in one pipeline that is a writer into another, local, one),
 
-• Discard the data, but perform certain view-only operation over it, such as ensure certain invariants are held, or measure the throughput of the pipeline,
+• Ultimately discard the data, but perform certain view-only operation over it, such as ensure certain invariants are held, or measure the throughput of the pipeline,
+
+• Throttle the dataflow, so that the throughput to the next stage of the pipeline is capped,
 
 • Modify the data, in certain streamed way (for example, stamp each 128-byte block with its own 8-byte unique index), or
 
@@ -178,6 +180,22 @@ And, of course, as there can possibly be another worker, that takes in the purpl
 
 • For all read-only workers that run in parallel, there is only one pointer to synchronously maintain: the slowest of these workers.
 
-Of course, much like in the previous example, each worked can, and probably should, be run in a separate CPU thread.
+Much like with the workers that operate sequentially, each worker of those started in parallel can, and probably should, be run in a separate CPU thread.
+
+The final bit to cover is joining several dataflows together.
+
+The above design assumed that each pipeline — as in, each allocated circular buffer with its set of workers — has only one writer. Because if there are two writers that do not communicate with each other, they will collide with each other, and we will have a race condition.
+
+But, in the real life, multiple writers are, quite often, what what should be done.
+
+The obvious solution is to make sure that each of the writers locks a mutex before writing into the (circular) buffer. But this can easily result in a lot of redundant mutex locks and unlocks, especially if a writer generates input messages one at a time, at the rate of high millions per second.
+
+One good way to make the problem easier is analogous to the idea of the “two-phase commit”. In the case of a single writer, what it does in the colored stripe visualization is turning segments of grey cells into the blue ones, where grey stands for “the new data not available yet” and green stands for “the new data is now ready to be processed by the workers”. In the case of multiple workers, they can pre-allocate ranges of the stripe to color, and immediately release the mutex for the duration of filling in those cells.
+
+For example, say, the buffer is of size two gigabytes, and it already has one gigabyte of data in it. Two writers independently want to put an extra half a gigabyte each, and the buffer has enough room to hold them both. Rather than one of the workers waiting until the other one is done writing its half a gigabyte into this buffer, each writer can claim their own ranges of the buffer — in this case the [1.0GB, 1.5GB) and [1.5GB, 2.0GB) blocks — and start their, potentially slow, process of making sure the data in those blocks is ready to be processed. The only caveat here is that the code that handles the pointers in the buffer must be careful to not mark the data that is not yet ready to be processed as available. For example, it may well happen that the writer that has claimed the second block declares it “ready to go” first. Since the workers must process the data continuously, they can not begin working on that now-ready second half of data until the first half is ready. So, the workers will still be in the waiting mode, until the writer that now owns the first half of the buffer to be committed is done with its job.
+
+Another way is to forget the idea of a single circular buffer and work with two or more input buffers simultaneously. Each of the input buffer may well be a circular buffers itself, but the workers would not need to know they are operating over what is not a single block of memory.
+
+And, of course, to prevent lock contention, it is useful to allocate a time cushion between consecutive mutex locks. For example, if your callers are the end users, who are real humans connected to you from real computers over the Internet, then, most likely, they would not notice another half a millisecond delay. Thus, even if your code is always in the “waiting for new data” mode, throttling the mutex to at most 2000 locks/unlocks per second would most likely be a viable first solution.
 
 And this concludes the story of how parallelization can be achieved in a multithreaded high-throughput system, with the code of each individual worked developed by an engineer who would rather not touch multithreading of any kind with a ten foot pole.
