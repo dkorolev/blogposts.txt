@@ -66,7 +66,7 @@ Now, we have visualized the writers as the entities that color our initially-gre
 
 • The worker can only take a blue cell and turn it green. If there is no blue in the buffer, but just green and grey, then the pipeline has processed all the data, and is now in the state of waiting for new data entries to enter the system.
 
-• The worker processed the blue cells left to right. Its atomic operation it taking the leftmost blue cell and turning it into green.
+• The worker processed the blue cells left to right. Its atomic operation is taking the leftmost blue cell and turning it into green.
 
 • The worker can only access the blue cells of the buffer; it can view the current leftmost, blue cell, and, possibly, more cells that are blue to the right of the one that it is currently working on. It can not look left, into the past, because, as the cell was colored green, it is no longer in the memory that is accessible (speaking in the circular buffer terms, the writer will eventually overwrite that memory location with a new blue cell).
 
@@ -186,7 +186,7 @@ The final bit to cover is joining several dataflows together.
 
 The above design assumed that each pipeline — as in, each allocated circular buffer with its set of workers — has only one writer. Because if there are two writers that do not communicate with each other, they will collide with each other, and we will have a race condition.
 
-But, in the real life, multiple writers are, quite often, what what should be done.
+But, in the real life, multiple writers are, quite often, what should be done.
 
 The obvious solution is to make sure that each of the writers locks a mutex before writing into the (circular) buffer. But this can easily result in a lot of redundant mutex locks and unlocks, especially if a writer generates input messages one at a time, at the rate of high millions per second.
 
@@ -208,12 +208,12 @@ Two easiest to imagine real-life scenarios could be:
 
 • If the data received from different sources was the data indexed and split into halves (say, the entries with odd indexes come from A, and the entries with even indexes come from B), then the output stream should perform the reconciliation respecting the desired order of entries.
 
-In both of these cases, the CPU-level work is involved. The latter case, by the way, is so common that is has a name — inplace sort — along with reference implemenations in various languages.
+In both of these cases, the CPU-level work is involved. The latter case, by the way, is so common that is has a name — inplace sort — along with reference implementations in various languages.
 
 Again, there is no need to get too fancy to solve this problem. Consider the simplest case of joining two streams index-by-index. Have two workers write their respective blocks of data into a single block of memory, following the “two-phase commit” idea to make sure the writes are parralelized. Then, as both data blobs are available, inplace-sort them. Afterwards, make sure to only send further to the workers the entries with the very next consecutive indexes — so that no holes can appear during this intelligent join phase. To not have to compare indexes one by one, the binary search algorithm can be used: if the first 100MB of data contains all the right indexes, but the first 300MB of data has the end index higher than expected, meaning there is a hole that should be filled first, then check the index of the entry at the 200MB mark next, and so on.
 
-And if the input buffer is circular, both the inplace sort and the binary search implemenetations would need to be tweaked so that they are both performant and correct with respect to possibly crossing the physical boundary of the buffer, and having to wrap the indexes over.
+And if the input buffer is circular, both the inplace sort and the binary search implementations would need to be tweaked so that they are both performant and correct with respect to possibly crossing the physical boundary of the buffer, and having to wrap the indexes over.
 
 So, processing sequential data flows is not as easy as it may look. But it still is straightforward enough when seen through the lens of the first principles.
 
-This concludes the story of how parallelization can be achieved in a multithreaded high-throughput system, with the code of each individual worked developed by an engineer who would rather not touch multithreading of any kind with a ten foot pole.
+This concludes the story of how parallelization can be achieved in a multithreaded high-throughput system, with the code of each individual worker developed by an engineer who would rather not touch multithreading of any kind with a ten foot pole.
