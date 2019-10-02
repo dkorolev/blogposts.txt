@@ -99,7 +99,7 @@ It is now plausible to ask: how many pigeon round-trips would it take for the Ne
 
 Say, we have three of five branches, A, B, and C, talking to each other via pigeon mail, and it takes an hour to deliver a message in each of six directions (A→B, B→A, A→C, C→A, B→C, C→B). Also, let’s assume that, as the result of the leader elections mechanism functioning smoothly, A, B, and C all know that A is the leader.
 
-If you were to request a new Number for a newborn child at B, B would have to talk to A. But it will not just be B asking A to “give me the Number”, and A replying back with “here it is”. In addition to such an exchange, both A and B would need to know that C is also aware of this Number being issued – otherwise C may lose connectivity with A and B, rejoice with D and E, and commit the Cardinal Sin of greenlighting the same Number that A and B have already agreed to be issued.
+If you were to request a new Number for a newborn child at B, B would have to talk to A. But it will not just be B asking A to “give me the Number”, and A replying back with “here it is”. In addition to such an exchange, both A and B would need to know that C is also aware of this Number being issued – otherwise C may lose connectivity with A and B, get back in touch with with D and E, and commit the Cardinal Sin of greenlighting the same Number that A and B have already agreed to be issued.
 
 So, the “customer” walks into B and requests a Number, and B asks A for one.
 
@@ -125,7 +125,7 @@ Also, do not forget that as consistency and partition tolerance are the strict r
 
 They would have read-only access to some, current, or, more likely, already-past state of the fleet. And, in the case of some partial (perhaps, one-way) connectivity, the requests they managed to send to the system will quite possibly be fulfilled. This is why the “request ID” is the crucial piece of the system; this is why idempotence (loosely the design idea where the “request ID” is required in any inbound request) is such an important property of an API, and this is why without the “request ID” reserved and kept on the caller side there can never be the “exactly once” guarantee, but only the “at least once” and the “at most once” options to choose from – both of which are incompatible with the requirement of consistency.
 
-In reality, when consistency is required, the design is always the “at least once” delivery, with request IDs inserted into reach request to keep them idempotent.
+In reality, when consistency is required, the design is always the “at least once” delivery, with request IDs inserted into each request to keep them idempotent.
 
 On a closing note of part one, to keep things somewhat easier to grasp, take a step up and think of two systems, with their own strong consistency guarantees, talking to each other. If each system, in and of itself, is designed following the above principles, there is a huge chance that, should a problem occur, it is not within one of the systems, but rather in the communication layer between them. Each system can be designed so that it is strongly consistent, with enormously high availability. It literally is more likely that a wire connecting those systems will be struck by lightning or damaged by an earthquake than it is that one of the systems would misbehave while handling the request.
 
